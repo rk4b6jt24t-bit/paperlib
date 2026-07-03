@@ -123,11 +123,16 @@
         <div class="w-full md:w-2/3 lg:w-3/4">
             
             <div class="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 mb-6">
-                <div id="statusArea" class="flex items-center gap-3 text-slate-600 dark:text-slate-400 font-medium w-full">
+                <div id="statusArea" class="flex items-center gap-3 text-slate-600 dark:text-slate-400 font-medium flex-1">
                     Listo para buscar.
                 </div>
+                <button id="weeklyBtn" onclick="generateWeeklyBrief()" class="shrink-0 text-sm font-medium text-white bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 px-4 py-2 rounded-lg transition-colors shadow-sm" title="Resumen ejecutivo de los resultados actuales">
+                    <i class="fa-solid fa-newspaper mr-1"></i> Resumen semanal
+                </button>
             </div>
-            
+
+            <div id="weeklyBriefContainer" class="hidden mb-6"></div>
+
             <div id="resultsContainer" class="flex flex-col gap-4"></div>
             <div id="libraryContainer" class="hidden"></div>
         </div>
@@ -1364,6 +1369,170 @@
             setTimeout(() => { btn.innerHTML = `<i class="fa-solid fa-floppy-disk mr-1"></i> Guardar`; }, 1500);
         }
 
+        // ============================================================
+        // INTELIGENCIA SOBRE LA LITERATURA (API de Claude)
+        // Opción C: usa la API embebida de artifacts, que SOLO funciona dentro
+        // de claude.ai. En GitHub Pages muestra un aviso (haría falta API key propia).
+        // ============================================================
+        const AI_MODEL = "claude-sonnet-4-6";
+
+        // Detecta si estamos dentro de claude.ai (donde la API embebida funciona sin key)
+        function aiAvailable() {
+            return /claude\.ai|claudeusercontent\.com|anthropic/.test(window.location.hostname);
+        }
+
+        function aiUnavailableNotice() {
+            return `<div class="p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-sm text-amber-800 dark:text-amber-300">
+                <i class="fa-solid fa-circle-info mr-1"></i> <strong>Función de IA no disponible aquí.</strong>
+                El resumen inteligente usa la API de Claude, que solo funciona dentro de claude.ai (como artifact).
+                Para usarla en tu sitio de GitHub Pages hace falta configurar una API key propia de Anthropic
+                — dímelo cuando quieras y lo añadimos.
+            </div>`;
+        }
+
+        // Llamada a la API embebida de Anthropic (disponible dentro de artifacts de claude.ai)
+        async function callClaude(prompt, maxTokens = 1024) {
+            const response = await fetch("https://api.anthropic.com/v1/messages", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: AI_MODEL,
+                    max_tokens: maxTokens,
+                    messages: [{ role: "user", content: prompt }]
+                })
+            });
+            if (!response.ok) throw new Error("API " + response.status);
+            const data = await response.json();
+            return data.content.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+        }
+
+        // --- TL;DR clínico de un artículo ---
+        async function generateTldr(pmid) {
+            const art = currentArticles.find(a => a.pmid === pmid) || savedFavorites.find(a => a.pmid === pmid);
+            if (!art) return;
+            const box = document.getElementById(`tldr-${pmid}`);
+            box.classList.remove('hidden');
+
+            if (!aiAvailable()) { box.innerHTML = aiUnavailableNotice(); return; }
+
+            const btn = document.getElementById(`tldr-btn-${pmid}`);
+            const prevBtn = btn.innerHTML;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1"></i> Analizando...`;
+            btn.disabled = true;
+            box.innerHTML = `<div class="p-4 bg-violet-50 dark:bg-violet-900/20 rounded-lg text-sm text-violet-700 dark:text-violet-300 flex items-center gap-2"><div class="loader"></div> Generando resumen clínico...</div>`;
+
+            const prompt = `Eres un radiólogo abdominal consultor senior. Analiza este artículo y da un TL;DR clínico ULTRA conciso para un colega experto que no tiene tiempo. Responde SOLO con este formato exacto, sin preámbulo:
+
+POBLACIÓN: (una línea: qué pacientes/qué modalidad)
+HALLAZGO: (una línea: el resultado principal en números si los hay)
+VEREDICTO: (una sola palabra en mayúsculas — PRACTICE-CHANGING, ÚTIL, o RUIDO — seguida de media línea justificando por qué)
+
+Título: ${art.title}
+Revista: ${art.journal} (${art.year})
+Abstract: ${art.abstract}`;
+
+            try {
+                const out = await callClaude(prompt, 400);
+                box.innerHTML = renderTldr(out);
+            } catch (e) {
+                box.innerHTML = `<div class="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300"><i class="fa-solid fa-triangle-exclamation mr-1"></i> No se pudo generar el resumen (${e.message}).</div>`;
+            } finally {
+                btn.innerHTML = prevBtn; btn.disabled = false;
+            }
+        }
+
+        function renderTldr(text) {
+            // Colorear el veredicto según su categoría
+            let verdictClass = 'text-slate-600 dark:text-slate-300';
+            if (/PRACTICE-CHANGING/i.test(text)) verdictClass = 'text-emerald-700 dark:text-emerald-400 font-bold';
+            else if (/RUIDO/i.test(text)) verdictClass = 'text-slate-400 dark:text-slate-500';
+            else if (/ÚTIL|UTIL/i.test(text)) verdictClass = 'text-blue-700 dark:text-blue-400 font-semibold';
+
+            const lines = text.split('\n').filter(l => l.trim()).map(line => {
+                const m = line.match(/^(POBLACIÓN|POBLACION|HALLAZGO|VEREDICTO):(.*)$/i);
+                if (m) {
+                    const isVerdict = /VEREDICTO/i.test(m[1]);
+                    return `<div class="flex gap-2 ${isVerdict ? 'mt-1 pt-2 border-t border-violet-200 dark:border-violet-800' : ''}">
+                        <span class="text-[11px] font-bold uppercase tracking-wide text-violet-500 dark:text-violet-400 w-24 shrink-0 pt-0.5">${m[1]}</span>
+                        <span class="text-sm ${isVerdict ? verdictClass : 'text-slate-700 dark:text-slate-200'}">${m[2].trim()}</span>
+                    </div>`;
+                }
+                return `<div class="text-sm text-slate-700 dark:text-slate-200">${line}</div>`;
+            }).join('');
+
+            return `<div class="p-4 bg-gradient-to-br from-violet-50 to-indigo-50 dark:from-violet-900/20 dark:to-indigo-900/20 rounded-lg border border-violet-200 dark:border-violet-800 flex flex-col gap-1.5">
+                <div class="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-violet-500 dark:text-violet-400 mb-1">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> TL;DR clínico
+                </div>
+                ${lines}
+            </div>`;
+        }
+
+        // --- Resumen semanal ejecutivo de los resultados actuales ---
+        async function generateWeeklyBrief() {
+            const container = document.getElementById('weeklyBriefContainer');
+            container.classList.remove('hidden');
+            container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+            if (!aiAvailable()) { container.innerHTML = aiUnavailableNotice(); return; }
+            if (!currentArticles.length) {
+                container.innerHTML = `<div class="p-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-500">Haz primero una búsqueda: el resumen ejecutivo analiza los resultados en pantalla.</div>`;
+                return;
+            }
+
+            const btn = document.getElementById('weeklyBtn');
+            const prevBtn = btn.innerHTML;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1"></i> Analizando ${currentArticles.length} papers...`;
+            btn.disabled = true;
+            container.innerHTML = `<div class="p-6 bg-gradient-to-br from-violet-50 to-indigo-50 dark:from-violet-900/20 dark:to-indigo-900/20 rounded-xl border border-violet-200 dark:border-violet-800 flex items-center gap-3 text-violet-700 dark:text-violet-300"><div class="loader"></div> Revisando la literatura de esta semana como lo haría tu fellow...</div>`;
+
+            // Limitar a los primeros 25 para no saturar el contexto
+            const subset = currentArticles.slice(0, 25);
+            const list = subset.map((a, i) => `[${i + 1}] ${a.title} — ${a.journal} ${a.year}\n${(a.abstract || '').slice(0, 600)}`).join('\n\n');
+
+            const prompt = `Eres el fellow de investigación de un radiólogo abdominal/HPB consultor senior. Te ha pedido un resumen ejecutivo de la literatura reciente. Aquí tienes ${subset.length} artículos nuevos.
+
+Escribe un brief ejecutivo BREVE y directo, en español, con este formato:
+
+**Lo esencial de esta semana** (2-3 frases con el panorama general)
+
+**Merece tu atención:**
+- Lista SOLO los papers realmente relevantes (practice-changing o clínicamente importantes para radiología abdominal/HPB). Para cada uno: número [n], una frase de por qué importa. Si alguno contradice o matiza una guía establecida (LI-RADS, estadificación, protocolos), destácalo.
+
+**Puedes ignorar:** (una frase resumiendo qué tipo de papers del resto son ruido o muy de nicho)
+
+Sé selectivo y honesto: si de los ${subset.length} solo 3 merecen atención, di solo 3. No rellenes.
+
+Artículos:
+${list}`;
+
+            try {
+                const out = await callClaude(prompt, 1500);
+                container.innerHTML = `<div class="p-6 bg-gradient-to-br from-violet-50 to-indigo-50 dark:from-violet-900/20 dark:to-indigo-900/20 rounded-xl border border-violet-200 dark:border-violet-800">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-2 text-sm font-bold text-violet-600 dark:text-violet-400"><i class="fa-solid fa-newspaper"></i> Resumen ejecutivo · ${subset.length} papers</div>
+                        <button onclick="document.getElementById('weeklyBriefContainer').classList.add('hidden')" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"><i class="fa-solid fa-xmark"></i></button>
+                    </div>
+                    <div class="prose-brief text-sm text-slate-700 dark:text-slate-200 leading-relaxed">${formatBrief(out)}</div>
+                </div>`;
+            } catch (e) {
+                container.innerHTML = `<div class="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300"><i class="fa-solid fa-triangle-exclamation mr-1"></i> No se pudo generar el resumen (${e.message}).</div>`;
+            } finally {
+                btn.innerHTML = prevBtn; btn.disabled = false;
+            }
+        }
+
+        // Formateo ligero de markdown básico (negritas, listas, referencias [n])
+        function formatBrief(text) {
+            return text
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/\*\*(.+?)\*\*/g, '<strong class="text-slate-900 dark:text-white">$1</strong>')
+                .replace(/\[(\d+)\]/g, '<span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold bg-violet-200 dark:bg-violet-800 text-violet-800 dark:text-violet-200 rounded">$1</span>')
+                .replace(/^[-•]\s+(.+)$/gm, '<div class="flex gap-2 my-1"><span class="text-violet-400 shrink-0">›</span><span>$1</span></div>')
+                .replace(/\n{2,}/g, '<div class="my-2"></div>')
+                .replace(/\n/g, '<br>');
+        }
+
         function renderArticles() {
             const container = document.getElementById('resultsContainer');
             const textQuery = document.getElementById('textFilter').value.toLowerCase();
@@ -1432,10 +1601,16 @@
                             </div>
                         </div>
 
+                        <div class="mt-3 hidden" id="tldr-${art.pmid}"></div>
+
                         <div class="flex flex-col lg:flex-row justify-between gap-3 mt-4 pt-4 border-t border-slate-100 dark:border-slate-700">
                             <div class="flex flex-wrap gap-2">
                                 <button onclick="document.getElementById('abstract-${art.pmid}').classList.toggle('hidden')" class="text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 bg-slate-100 dark:bg-slate-700 hover:bg-blue-50 dark:hover:bg-slate-600 px-3 py-1.5 rounded-lg transition-colors">
                                     <i class="fa-solid fa-align-left mr-1"></i> Resumen
+                                </button>
+
+                                <button id="tldr-btn-${art.pmid}" onclick="generateTldr('${art.pmid}')" class="text-sm font-medium text-white bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 px-3 py-1.5 rounded-lg transition-colors shadow-sm" title="Resumen clínico con IA: qué cambia en tu práctica">
+                                    <i class="fa-solid fa-wand-magic-sparkles mr-1"></i> TL;DR clínico
                                 </button>
                                 
                                 <a href="https://pubmed.ncbi.nlm.nih.gov/${art.pmid}/" target="_blank" class="text-sm font-medium text-blue-600 dark:text-blue-400 border border-blue-600 dark:border-blue-400 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-500 px-3 py-1.5 rounded-lg transition-colors">
