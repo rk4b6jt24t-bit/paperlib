@@ -193,7 +193,7 @@
         //     donde alojarás este HTML, ej. https://TUUSUARIO.github.io/paperlib/Dashboard_papers.html
         //     (OAuth no funciona con archivos locales file:// — hace falta GitHub Pages o similar)
         //  6. Copiar el "App key" de Settings y pegarlo abajo:
-        const DROPBOX_APP_KEY = "668athd8lz2pdy2";  // ← pegar aquí el App key
+        const DROPBOX_APP_KEY = "668athd8lz2pdy2";
         // ------------------------------------------------------------
         // ============================================================
 
@@ -958,8 +958,11 @@
             if (entry.hasPdf) {
                 pdfPane.innerHTML = `<div class="flex items-center justify-center h-full text-slate-500 text-sm gap-2"><div class="loader"></div> Descargando PDF de Dropbox...</div>`;
                 try {
-                    const blob = await dbxReadBlob(`papers/${pmid}/paper.pdf`);
+                    const rawBlob = await dbxReadBlob(`papers/${pmid}/paper.pdf`);
                     if (readerCurrentPmid !== pmid) return; // el usuario cerró o cambió de artículo durante la descarga
+                    // Dropbox devuelve application/octet-stream: re-etiquetar como PDF para que
+                    // el navegador lo previsualice en línea en vez de descargarlo.
+                    const blob = new Blob([rawBlob], { type: 'application/pdf' });
                     const url = URL.createObjectURL(blob);
                     // En iPad/Safari los iframes de PDF solo muestran la primera página: se ofrece también abrir en pestaña.
                     pdfPane.innerHTML = `
