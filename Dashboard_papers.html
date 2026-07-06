@@ -194,6 +194,12 @@
                         </button>
                         <div id="deepDiveOutput" class="hidden mt-2"></div>
                     </div>
+                    <div>
+                        <button id="relatedBtn" onclick="loadRelatedPapers()" class="w-full text-sm font-medium text-slate-600 dark:text-slate-300 border border-slate-300 dark:border-slate-600 hover:border-blue-400 hover:text-blue-600 dark:hover:text-blue-400 py-2 rounded-lg transition-colors" title="Buscar artículos similares en PubMed">
+                            <i class="fa-solid fa-diagram-project mr-1"></i> Papers relacionados
+                        </button>
+                        <div id="relatedOutput" class="hidden mt-2"></div>
+                    </div>
                     <button id="readerSaveBtn" onclick="saveReaderChanges()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition-colors shadow-sm shrink-0">
                         <i class="fa-solid fa-floppy-disk mr-1"></i> Guardar
                     </button>
@@ -811,6 +817,16 @@
             const art = currentArticles.find(a => a.pmid === pmid) || savedFavorites.find(a => a.pmid === pmid);
             if (!art) return;
 
+            // Detección de duplicados por DOI: el mismo artículo puede tener distinto PMID
+            // (p. ej. una versión preprint vs. la publicada) pero comparte DOI.
+            if (art.doi) {
+                const dup = libraryIndex.find(p => p.doi && p.doi.toLowerCase() === art.doi.toLowerCase());
+                if (dup) {
+                    const proceed = confirm(`Ya tienes un artículo con el mismo DOI en tu biblioteca:\n\n"${dup.title}"\n\n¿Añadir de todos modos como entrada separada?`);
+                    if (!proceed) return;
+                }
+            }
+
             const btn = document.getElementById(`lib-btn-${pmid}`);
             if (btn) { btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i>`; btn.disabled = true; }
 
@@ -971,6 +987,12 @@
                         ${s === 'all' ? 'Todos' : statusLabels[s]} (${s === 'all' ? libraryIndex.length : libraryIndex.filter(p => p.status === s).length})
                     </button>`).join('')}
                 <input type="text" value="${(libSearchQuery || '').replace(/"/g, '&quot;')}" oninput="setLibrarySearch(this.value)" placeholder="Buscar en título, notas, tags..." class="flex-1 min-w-[180px] border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-1.5 bg-white dark:bg-slate-700 text-sm outline-none dark:text-white">
+                <button onclick="flightModeDownload()" class="text-sm text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 px-3 py-1.5" title="Descargar todos los PDFs 'por leer' para lectura offline">
+                    <i class="fa-solid fa-plane mr-1"></i>Modo vuelo
+                </button>
+                <button onclick="exportLibraryForCitations()" class="text-sm text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 px-3 py-1.5" title="Exportar biblioteca para el widget de citas en tus reportes">
+                    <i class="fa-solid fa-quote-right mr-1"></i>Exportar para citas
+                </button>
                 <button onclick="signOutLibrary()" class="text-sm text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 px-3 py-1.5" title="Cerrar sesión de Dropbox">
                     <i class="fa-solid fa-right-from-bracket mr-1"></i>Cerrar sesión
                 </button>
@@ -1015,8 +1037,55 @@
             container.innerHTML = html;
         }
 
-        async function signOutLibrary() {
-            if (!confirm('¿Cerrar sesión de Dropbox en este dispositivo? Tu biblioteca en Dropbox no se borra.')) return;
+        // Modo vuelo: descarga a tu dispositivo todos los PDFs de artículos "por leer"
+        // para lectura offline (avión, sitios sin wifi). Los guarda en Descargas.
+        async function flightModeDownload() {
+            if (!libraryConnected()) { alert('Conecta primero tu biblioteca de Dropbox.'); return; }
+            const targets = libraryIndex.filter(p => p.hasPdf && (p.status === 'to-read' || p.status === 'reading'));
+            if (!targets.length) { alert('No hay PDFs marcados como "por leer" o "leyendo" para descargar.'); return; }
+
+            if (!confirm(`Modo vuelo: se descargarán ${targets.length} PDF(s) a tu dispositivo para lectura offline.\n\nEn el iPad quedarán en Archivos → Descargas. ¿Continuar?`)) return;
+
+            const statusArea = document.getElementById('statusArea');
+            let done = 0, failed = 0;
+            for (const p of targets) {
+                if (showingLibrary) {
+                    document.getElementById('libraryContainer').scrollIntoView({ block: 'start' });
+                }
+                statusArea.innerHTML = `<div class="loader"></div> Modo vuelo: descargando ${done + 1}/${targets.length}...`;
+                try {
+                    const blob = await dbxReadBlob(`papers/${p.pmid}/paper.pdf`);
+                    const pdfBlob = new Blob([blob], { type: 'application/pdf' });
+                    const url = URL.createObjectURL(pdfBlob);
+                    const a = document.createElement('a');
+                    // Nombre de archivo legible: primeras palabras del título + año
+                    const safe = (p.title || p.pmid).replace(/[^a-z0-9]+/gi, '_').slice(0, 60);
+                    a.href = url; a.download = `${safe}_${p.year || ''}.pdf`; a.click();
+                    URL.revokeObjectURL(url);
+                    done++;
+                    await new Promise(r => setTimeout(r, 400)); // pausa entre descargas para no saturar
+                } catch (e) { failed++; }
+            }
+            statusArea.innerHTML = `<i class="fa-solid fa-plane text-blue-500"></i> Modo vuelo completado: ${done} descargado(s)${failed ? `, ${failed} fallido(s)` : ''}.`;
+        }
+
+        // Exporta la biblioteca a un JSON ligero para el widget de citas en los reportes.
+        // Solo metadatos de cita (sin notas ni subrayados), para mantener el archivo pequeño.
+        function exportLibraryForCitations() {
+            if (!libraryIndex.length) { alert('Tu biblioteca está vacía.'); return; }
+            const cites = libraryIndex.map(p => ({
+                pmid: p.pmid, title: p.title, journal: p.journal, year: p.year, doi: p.doi || '',
+                authors: p.authors || '', tags: p.tags || []
+            }));
+            const blob = new Blob([JSON.stringify(cites, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'library.json'; a.click();
+            URL.revokeObjectURL(url);
+            alert(`Exportados ${cites.length} artículos a library.json.\n\nGuárdalo junto a tus reportes (pCCA Reporter, PACT-UK) y el widget de citas lo leerá.`);
+        }
+
+        async function signOutLibrary() {            if (!confirm('¿Cerrar sesión de Dropbox en este dispositivo? Tu biblioteca en Dropbox no se borra.')) return;
             try {
                 await dbxFetch('https://api.dropboxapi.com/2/auth/token/revoke', { method: 'POST' });
             } catch (e) { /* si falla la revocación remota, limpiamos igualmente el estado local */ }
@@ -1058,6 +1127,10 @@
             document.getElementById('readerStatus').value = entry.status;
             renderReaderTagChips(entry);
             renderHighlightsList(entry);
+            document.getElementById('deepDiveOutput').classList.add('hidden');
+            document.getElementById('deepDiveOutput').innerHTML = '';
+            document.getElementById('relatedOutput').classList.add('hidden');
+            document.getElementById('relatedOutput').innerHTML = '';
 
             const pdfPane = document.getElementById('readerPdfPane');
             if (entry.hasPdf) {
@@ -1456,6 +1529,55 @@ ${text}`;
             const notesEl = document.getElementById('readerNotes');
             const stamp = `\n\n--- Análisis IA (${new Date().toLocaleDateString()}) ---\n` + window._lastDeepDive.replace(/\*\*/g, '');
             notesEl.value = (notesEl.value + stamp).trim();
+        }
+
+        // --- Papers relacionados (PubMed eLink: "similar articles") ---
+        async function loadRelatedPapers() {
+            const entry = currentEntry();
+            const out = document.getElementById('relatedOutput');
+            out.classList.remove('hidden');
+            if (!entry || entry.pmid.startsWith('DEMO')) {
+                out.innerHTML = `<div class="text-xs text-slate-500 p-2">No disponible para artículos de demostración.</div>`;
+                return;
+            }
+
+            const btn = document.getElementById('relatedBtn');
+            const prev = btn.innerHTML;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1"></i> Buscando...`;
+            btn.disabled = true;
+            out.innerHTML = `<div class="p-2 text-xs text-slate-500 flex items-center gap-2"><div class="loader"></div> Consultando PubMed...</div>`;
+
+            try {
+                // 1) eLink: PMIDs similares según el algoritmo de PubMed ("neighbor" score)
+                const linkUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pubmed&id=${entry.pmid}&linkname=pubmed_pubmed&retmode=json`;
+                const linkRes = await fetch(linkUrl);
+                if (!linkRes.ok) throw new Error('eLink ' + linkRes.status);
+                const linkData = await linkRes.json();
+                const linkset = linkData.linksets?.[0]?.linksetdbs?.find(l => l.linkname === 'pubmed_pubmed');
+                const relatedIds = (linkset?.links || []).slice(0, 6);
+
+                if (!relatedIds.length) {
+                    out.innerHTML = `<div class="text-xs text-slate-500 p-2">PubMed no encontró artículos similares para este.</div>`;
+                    return;
+                }
+
+                // 2) eSummary: título/revista/año de cada PMID relacionado
+                const sumUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${relatedIds.join(',')}&retmode=json`;
+                const sumRes = await fetch(sumUrl);
+                if (!sumRes.ok) throw new Error('eSummary ' + sumRes.status);
+                const sumData = await sumRes.json();
+
+                const items = relatedIds.map(id => sumData.result?.[id]).filter(Boolean);
+                out.innerHTML = `<div class="flex flex-col gap-1.5">${items.map(it => `
+                    <a href="https://pubmed.ncbi.nlm.nih.gov/${it.uid}/" target="_blank" class="block text-xs p-2 bg-slate-50 dark:bg-slate-700/50 hover:bg-blue-50 dark:hover:bg-slate-700 rounded-lg border border-slate-100 dark:border-slate-700 transition-colors">
+                        <div class="font-medium text-slate-700 dark:text-slate-200 leading-snug">${it.title}</div>
+                        <div class="text-slate-400 dark:text-slate-500 mt-0.5">${it.fulljournalname || it.source || ''} · ${(it.pubdate || '').slice(0, 4)}</div>
+                    </a>`).join('')}</div>`;
+            } catch (e) {
+                out.innerHTML = `<div class="text-xs text-red-500 p-2"><i class="fa-solid fa-triangle-exclamation mr-1"></i>No se pudo consultar PubMed: ${e.message}</div>`;
+            } finally {
+                btn.innerHTML = prev; btn.disabled = false;
+            }
         }
 
         // ============================================================
